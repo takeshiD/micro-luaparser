@@ -4,6 +4,7 @@ use std::env::args;
 use std::{fs, io, path, process};
 use tracing::{info, error};
 
+
 fn main() {
     tracing_subscriber::fmt()
         .with_ansi(true)
