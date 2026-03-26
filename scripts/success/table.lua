@@ -8,4 +8,5 @@ M.abs = function(x)
 		return x * 2
 	end
 end
-return M
+return M;
+local a

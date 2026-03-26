@@ -14,47 +14,34 @@
 /// ]
 /// Ident('M') = Token {
 ///    kind: TokenKind::Ident
-///    range: Range{start: 21, end: 22}
+///    len: 1
 /// }
-use std::ops::Range;
+use std::str::Chars;
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LiteralKind {
+    Number,
+    String,
+    LongString { level: u32 },
+    Boolean,
+    Nil,
+}
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TokenKind {
     // Trivias
-    Whitespace,             // ' ', '\t', '\n'
+    Whitespace,             // ' ', '\t', '\n', '\r'
     LineComment,            // '--...'
-    BlockComment,           // '--[[...]]', '--[==[...]==]'
+    BlockComment {
+        level: u32,
+    },           // '--[[...]]', '--[==[...]==]'
     
     // Literals
-    Number,                 // '3', '3.0', '3.1416', '314.16e-2', '0.31416E1', '0xff', '0x56'
-    String,                 // 'string', "string"
-    LongString,             // '--[[...]]', '--[==[...]==]'
+    /// number: '3', '3.0', '3.1416', '314.16e-2', '0.31416E1', '0xff', '0x56'
+    /// string: 'string', "string", [[...]], [==[...]==]
+    Literal { kind: LiteralKind },
 
     // Indentifier
-    Ident,                  // 'x', 'dy'
-
-    // Reserved keywords
-    True,                   // 'true'
-    False,                  // 'false'
-    Nil,                    // 'nil'
-    And,                    // 'and'
-    Or,                     // 'or'
-    Not,                    // 'not'
-    For,                    // 'for'
-    While,                  // 'while'
-    Until,                  // 'until'
-    Repeat,                 // 'repeat'
-    Do,                     // 'do'
-    In,                     // 'in'
-    If,                     // 'if'
-    Then,                   // 'then'
-    ElseIf,                 // 'elseif'
-    Else,                   // 'else'
-    Break,                  // 'break'
-    End,                    // 'end'
-    Return,                 // 'return'
-    Local,                  // 'local'
-    Function,               // 'function'
+    Ident,                  // 'local', 'function', 'x', 'dy'
 
     // Symbols
     Plus,                   // '+'
@@ -89,84 +76,199 @@ enum TokenKind {
     Eof,                    // End of file mark
 }
 
-type TokenIdx = u64;
+#[derive(Debug, Clone, PartialEq)]
 struct Token {
     pub kind: TokenKind,
-    pub range: std::ops::Range<TokenIdx>,
+    pub len: u32, // 4GB
+}
+
+impl Token {
+    pub fn new(kind: TokenKind, len: u32) -> Self {
+        Self { kind, len }
+    }
 }
 
 pub struct Lexer<'a> {
-    inner: &'a str,
-    pos: TokenIdx,
-    token_start: TokenIdx,
-    token_end: TokenIdx,
+    inner: Chars<'a>,
+    pos: u32, // 4GB
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(inner: &'a str) -> Self {
         Self {
-            inner,
+            inner: inner.chars(),
             pos: 0,
-            token_start: 0,
         }
     }
     pub fn tokenize(&mut self) -> Vec<Token> {
         let mut tokens = Vec::new();
         loop {
             let tok = self.next_token();
-            let done = tok.kind == TokenKind::Eof;
-            tokens.push(tok);
-            if done {
+            if tok.kind == TokenKind::Eof {
                 break;
             }
+            tokens.push(tok);
         }
         tokens
     }
     fn next_token(&mut self) -> Token {
-        if self.is_eof() {
-            Token {
-                kind: TokenKind::Eof,
-                range: Range {
-                    start: self.pos,
-                    end: self.pos,
-                },
+        let start = self.pos;
+        let Some(cur) = self.consume() else {
+            return Token::new(TokenKind::Eof, 0);
+        };
+        let kind = match cur {
+            // skip whitespace
+            ' ' | '\t' | '\n' | '\r' => {
+                while matches!(self.peek(), ' ' | '\t' | '\n' | '\r') {
+                    self.consume();
+                }
+                TokenKind::Whitespace
             }
+            '-' => {
+                // comments
+                if self.starts_with("-[") {
+                    let start_level = self.pos;
+                    while self.expect("=") {}
+                    let level = self.pos - start_level;
+                    if self.peek() == '[' {
+                        while self.peek() != ']' {
+                            self.consume();
+                        }
+                        self.consume();
+                        let mut level_str = "=".repeat(level as usize).to_string();
+                        level_str.push(']');
+                        if level > 0 && self.starts_with(level_str.as_str()) {
+                            TokenKind::BlockComment { level }
+                        } else {
+                            TokenKind::Error
+                        }
+                    } else {
+                        TokenKind::Error
+                    }
+                } else if self.starts_with("-") {
+                    while matches!(self.peek(), '\n' | '\r') {
+                        self.consume();
+                    }
+                    TokenKind::LineComment
+                } else {
+                    TokenKind::Minus
+                }
+            }
+            '(' => TokenKind::LParen,
+            ')' => TokenKind::RParen,
+            '{' => TokenKind::LBrace,
+            '}' => TokenKind::RBrace,
+            '[' => match self.peek() {
+                '[' => {
+                    let start_level = self.pos;
+                    while self.expect("=") {}
+                    let level = self.pos - start_level;
+                    if self.peek() == '[' {
+                        while self.peek() != ']' {
+                            self.consume();
+                        }
+                        self.consume();
+                        let mut level_str = "=".repeat(level as usize).to_string();
+                        level_str.push(']');
+                        if level > 0 && self.starts_with(level_str.as_str()) {
+                            TokenKind::Literal {
+                                kind: LiteralKind::LongString { level },
+                            }
+                        } else {
+                            TokenKind::Error
+                        }
+                    } else {
+                        TokenKind::Error
+                    }
+                }
+                _ => TokenKind::LBracket,
+            },
+            ']' => TokenKind::RBracket,
+            '+' => TokenKind::Plus,
+            '*' => TokenKind::Star,
+            '/' => TokenKind::Slash,
+            '%' => TokenKind::Percent,
+            '^' => TokenKind::Caret,
+            '#' => TokenKind::Hash,
+            ';' => TokenKind::Semi,
+            ':' => TokenKind::Colon,
+            ',' => TokenKind::Comma,
+            '.' => {
+                if self.starts_with("..") {
+                    TokenKind::Ellipsis
+                } else if self.starts_with(".") {
+                    TokenKind::DotDot
+                } else {
+                    TokenKind::Dot
+                }
+            }
+            '=' => match self.peek() {
+                '=' => {
+                    self.consume();
+                    TokenKind::EqEq
+                }
+                _ => TokenKind::Eq,
+            },
+            '<' => match self.peek() {
+                '=' => {
+                    self.consume();
+                    TokenKind::LtEq
+                }
+                _ => TokenKind::Lt,
+            },
+            '>' => match self.peek() {
+                '=' => {
+                    self.consume();
+                    TokenKind::GtEq
+                }
+                _ => TokenKind::Gt,
+            },
+            '~' => match self.peek() {
+                '=' => TokenKind::TildeEq,
+                _ => TokenKind::Error,
+            },
+            _ => TokenKind::Error,
+        };
+        Token::new(kind, self.pos - start)
+    }
+
+    // peek 1 byte
+    fn peek(&self) -> char {
+        self.inner
+            .clone()
+            .peekable()
+            .peek()
+            .cloned()
+            .unwrap_or('\0')
+    }
+    // consume 1 byte
+    fn consume(&mut self) -> Option<char> {
+        self.inner.next()
+    }
+    fn consume_bytes(&mut self, n: usize) {
+        self.inner = self.inner.as_str()[n..].chars();
+    }
+    // consume bytes if pattern is matched
+    fn expect(&mut self, pattern: &str) -> bool {
+        if self.starts_with(pattern) {
+            self.consume_bytes(pattern.len());
+            true
         } else {
-            self.scan_token()
+            false
         }
     }
-    fn start_token(&mut self) {
-        self.token_start = self.pos;
+    fn starts_with(&self, pattern: &str) -> bool {
+        self.inner.as_str().starts_with(pattern)
     }
-    fn end_token(&mut self) {
-        self.token_start = self.pos;
-    }
-    fn scan_token(&mut self) -> Token {
-        match self.peek() {
-            c @ b' ' | b'\n' | b'\t' | b'\r' => {
-                while self.consume(iswhitespace)
-                self.consume();
-            }
-        }
-    }
-    // peek n bytes ahead
-    fn nth(&self, n: usize) -> u8 {
-        let pos = usize::saturating_add(self.pos, n);
-        self.inner.as_bytes().get(pos).copied().unwrap_or(b'0')
-    }
-    fn peek(&self) -> u8 {
-        self.nth(0)
-    }
-    fn is_eof(&self) -> bool {
-        self.pos >= self.inner.len()
-    }
-    fn is_whitespace(&self) -> bool {
-        matches!(self.peek(), b' ' | b'\n' | b'\t' | b'\r')
-    }
-    fn skip(&mut self, n: usize) {
-        usize::saturating_add(self.pos, n);
-    }
-    fn consume(&mut self, expect: &[u8]) -> bool {
-        unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn symbols() {
+        let target = "--hello";
+        let tokens = Lexer::new(target).tokenize();
+        assert_eq!(tokens, vec![Token::new(TokenKind::Ident, 4)]);
     }
 }
