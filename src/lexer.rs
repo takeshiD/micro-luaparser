@@ -2,7 +2,7 @@ use std::str::Chars;
 /// local x = "12"
 /// local M = {}
 /// M.add = function(x,y)
-///     return x+y
+///     return x+nd::TildeEq,                _ => TokenKind::Error,y
 /// end
 /// ->
 /// [
@@ -77,7 +77,7 @@ enum TokenKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Token {
+pub struct Token {
     pub kind: TokenKind,
     pub len: u32, // 4GB
 }
@@ -123,6 +123,10 @@ impl<'a> Lexer<'a> {
                 }
                 TokenKind::Whitespace
             }
+            c if is_identifier_head(c) => {
+                self.consume_while(is_identifier_body);
+                TokenKind::Ident
+            }
             '0'..='9' => {
                 self.consume_number(cur);
                 TokenKind::Literal {
@@ -132,9 +136,9 @@ impl<'a> Lexer<'a> {
             '-' => {
                 // comments
                 if self.expect("-[") {
-                    let start_level = self.len_remaining;
+                    let start_level = self.inner.as_str().len();
                     while self.expect("=") {}
-                    let level = self.len_remaining - start_level;
+                    let level = start_level - self.inner.as_str().len();
                     if self.peek() == '[' {
                         while self.peek() != ']' {
                             self.consume();
@@ -168,10 +172,10 @@ impl<'a> Lexer<'a> {
             '{' => TokenKind::LBrace,
             '}' => TokenKind::RBrace,
             '[' => match self.peek() {
-                '[' => {
-                    let start_level = self.len_remaining;
+                '[' | '=' => {
+                    let start_level = self.inner.as_str().len();
                     while self.expect("=") {}
-                    let level = self.len_remaining - start_level;
+                    let level = start_level - self.inner.as_str().len();
                     if self.peek() == '[' {
                         while self.peek() != ']' {
                             self.consume();
@@ -179,7 +183,7 @@ impl<'a> Lexer<'a> {
                         let mut level_str = "]".to_string();
                         level_str.push_str(&"=".repeat(level).to_string());
                         level_str.push(']');
-                        if self.starts_with(level_str.as_str()) {
+                        if self.expect(&level_str) {
                             TokenKind::Literal {
                                 kind: LiteralKind::LongString {
                                     level: level as u32,
@@ -205,7 +209,12 @@ impl<'a> Lexer<'a> {
             ':' => TokenKind::Colon,
             ',' => TokenKind::Comma,
             '.' => {
-                if self.starts_with("..") {
+                if is_number(self.peek()) {
+                    self.consume_number(cur);
+                    TokenKind::Literal {
+                        kind: LiteralKind::Number,
+                    }
+                } else if self.starts_with("..") {
                     TokenKind::Ellipsis
                 } else if self.starts_with(".") {
                     TokenKind::DotDot
@@ -238,6 +247,30 @@ impl<'a> Lexer<'a> {
                 '=' => TokenKind::TildeEq,
                 _ => TokenKind::Error,
             },
+            '\"' => {
+                while !matches!(self.peek(), '\n' | '\r' | '\"' | '\0') {
+                    self.consume();
+                }
+                if let Some('\"') = self.consume() {
+                    TokenKind::Literal {
+                        kind: LiteralKind::String,
+                    }
+                } else {
+                    TokenKind::Error
+                }
+            }
+            '\'' => {
+                while !matches!(self.peek(), '\n' | '\r' | '\'' | '\0') {
+                    self.consume();
+                }
+                if let Some('\'') = self.consume() {
+                    TokenKind::Literal {
+                        kind: LiteralKind::String,
+                    }
+                } else {
+                    TokenKind::Error
+                }
+            }
             _ => TokenKind::Error,
         };
         let tok = Token::new(kind, self.pos_within_token());
@@ -324,6 +357,13 @@ fn is_hex_digit(c: char) -> bool {
     matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F')
 }
 
+fn is_identifier_head(c: char) -> bool {
+    matches!(c, 'a'..='z' | 'A'..='Z' | '_')
+}
+fn is_identifier_body(c: char) -> bool {
+    matches!(c, 'a'..='z' | 'A'..='Z' | '_' | '0'..='9')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +412,74 @@ mod tests {
         );
     }
     #[test]
+    fn literal_string() {
+        // double quotes
+        let target = r#""hello""#;
+        let mut lexer = Lexer::new(target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::String
+                },
+                7
+            ),]
+        );
+        // single quotes
+        let target = r#"'hello'"#;
+        let mut lexer = Lexer::new(target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::String
+                },
+                7
+            ),]
+        );
+    }
+    #[test]
+    fn literal_longstring() {
+        // no level
+        let target = unindent(
+            r#"
+        [[
+        hello
+        ]]"#,
+        );
+        let mut lexer = Lexer::new(&target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::LongString { level: 0 }
+                },
+                11
+            ),]
+        );
+        // with level
+        let target = unindent(
+            r#"
+        [==[
+        hello
+        ]==]"#,
+        );
+        let mut lexer = Lexer::new(&target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::LongString { level: 2 }
+                },
+                15
+            ),]
+        );
+    }
+    #[test]
     fn lieral_number() {
         let target = "3";
         let mut lexer = Lexer::new(target);
@@ -383,6 +491,18 @@ mod tests {
                     kind: LiteralKind::Number
                 },
                 1
+            ),]
+        );
+        let target = "3.";
+        let mut lexer = Lexer::new(target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::Number
+                },
+                2
             ),]
         );
         let target = "-3";
@@ -422,6 +542,18 @@ mod tests {
                     kind: LiteralKind::Number
                 },
                 6
+            ),]
+        );
+        let target = ".1416";
+        let mut lexer = Lexer::new(target);
+        let tokens = lexer.tokenize();
+        assert_eq!(
+            tokens,
+            vec![Token::new(
+                TokenKind::Literal {
+                    kind: LiteralKind::Number
+                },
+                5
             ),]
         );
         let target = "314.16e-2";
